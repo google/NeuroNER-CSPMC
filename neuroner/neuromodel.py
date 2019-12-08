@@ -1,3 +1,26 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import codecs
 import configparser
 import copy
@@ -121,11 +144,13 @@ def _get_default_param():
              'load_all_pretrained_token_embeddings':False,
              'main_evaluation_mode':'conll',
              'maximum_number_of_epochs':100,
-             'number_of_cpu_threads':8,
+             'number_of_cpu_threads':16,
+             'number_of_cpu_threads_prediction':50,
              'number_of_gpus':0,
+             'number_of_cpus':16,
              'optimizer':'sgd',
              'output_folder':'./output',
-             'output_scores':False,
+             'output_scores':True,
              'patience':10,
              'parameters_filepath': os.path.join('.','parameters.ini'),
              'plot_format':'pdf',
@@ -140,6 +165,10 @@ def _get_default_param():
              'tagging_format':'bioes',
              'token_embedding_dimension':100,
              'token_lstm_hidden_state_dimension':100,
+             'allow_labels_not_in_pretrained_model':True,
+             'recall_inference_bias':0.0,
+             'enable_leading_spaces_feature':True,
+             'enable_capitalization_feature':True,
              'token_pretrained_embedding_filepath':'./data/word_vectors/glove.6B.100d.txt',
              'tokenizer':'spacy',
              'train_model':True,
@@ -191,18 +220,21 @@ def _clean_param_dtypes(param):
             'character_lstm_hidden_state_dimension', 'token_embedding_dimension',
             'token_lstm_hidden_state_dimension', 'patience',
             'maximum_number_of_epochs', 'maximum_training_time',
-            'number_of_cpu_threads', 'number_of_gpus']:
+            'number_of_cpu_threads', 'number_of_cpu_threads_prediction', 'number_of_gpus', 'number_of_cpus',
+            ]:
             param[k] = int(v)
-        elif k in ['dropout_rate', 'learning_rate', 'gradient_clipping_value']:
+        elif k in ['dropout_rate', 'learning_rate', 'gradient_clipping_value', 'recall_inference_bias']:
             param[k] = float(v)
-        elif k in ['remap_unknown_tokens_to_unk', 'use_character_lstm',
-            'use_crf', 'train_model', 'use_pretrained_model', 'debug', 'verbose',
+        elif k in ['allow_labels_not_in_pretrained_model',
+            'remap_unknown_tokens_to_unk', 'use_character_lstm', 'use_crf',
+            'train_model', 'use_pretrained_model', 'debug', 'verbose',
             'reload_character_embeddings', 'reload_character_lstm',
             'reload_token_embeddings', 'reload_token_lstm',
             'reload_feedforward', 'reload_crf', 'check_for_lowercase',
             'check_for_digits_replaced_with_zeros', 'output_scores',
             'freeze_token_embeddings', 'load_only_pretrained_token_embeddings',
-            'load_all_pretrained_token_embeddings']:
+            'load_all_pretrained_token_embeddings',
+            'enable_leading_spaces_feature', 'enable_capitalization_feature']:
             param[k] = distutils.util.strtobool(v)
 
     return param
@@ -210,22 +242,19 @@ def _clean_param_dtypes(param):
 
 def load_parameters(**kwargs):
     '''
-    Load parameters from the ini file if specified, take into account any
-    command line argument, and ensure that each parameter is cast to the
-    correct type.
-
-    Command line arguments take precedence over parameters specified in the
-    parameter file.
+    Loads params from an ini file if specified in kwargs else loads the default
+    ini file that's specified in default params (root param ini). Then kwargs
+    params override. Then pretrain hparams override if use_pretrained_model.
+    Then kwargs override once more finally.
     '''
     param = {}
-    param_default = _get_default_param()
 
     # use parameter path if provided, otherwise use default
     try:
         if kwargs['parameters_filepath']:
             parameters_filepath = kwargs['parameters_filepath']
     except:
-        parameters_filepath = param_default['parameters_filepath']
+        parameters_filepath = _get_default_param()['parameters_filepath']
 
     param_config, param_file_txt = _get_config_param(parameters_filepath)
 
@@ -236,11 +265,6 @@ def load_parameters(**kwargs):
     # Command line args should overwrite settings in the parameter file
     for k, v in kwargs.items():
         param[k] = v
-
-    # Any missing args can be set to default
-    for k, v in param_default.items():
-        if k not in param:
-            param[k] = param_default[k]
 
     # clean the data types
     param = _clean_param_dtypes(param)
@@ -255,9 +279,7 @@ def load_parameters(**kwargs):
             pretrain_param, _ = _get_config_param(pretrain_path)
             pretrain_param = _clean_param_dtypes(pretrain_param)
 
-            pretrain_list = ['use_character_lstm', 'character_embedding_dimension',
-                'character_lstm_hidden_state_dimension', 'token_embedding_dimension',
-                'token_lstm_hidden_state_dimension', 'use_crf']
+            pretrain_list = pretrain_param.keys()
 
             for name in pretrain_list:
                 if param[name] != pretrain_param[name]:
@@ -269,6 +291,12 @@ def load_parameters(**kwargs):
         else:
             msg = """Warning: pretraining parameter file not found."""
             print(msg)
+
+    # Command line args should overwrite settings in the parameter file
+    for k, v in kwargs.items():
+        param[k] = v
+    # clean the data types
+    param = _clean_param_dtypes(param)
 
     # update param_file_txt to reflect the overriding
     param_to_section = utils.get_parameter_to_section_of_configparser(param_file_txt)
@@ -398,7 +426,7 @@ def check_param_compatibility(parameters, dataset_filepaths):
             """
             warnings.warn(warn_msg)
     except KeyError:
-        parameters['output_scores'] = False
+        parameters['output_scores'] = True
 
 
 
@@ -425,7 +453,9 @@ class NeuroNER(object):
         main_evaluation_mode (type): description
         maximum_number_of_epochs (type): description
         number_of_cpu_threads (type): description
+        number_of_cpu_threads_prediction (type): description
         number_of_gpus (type): description
+        number_of_cpus (type): description
         optimizer (type): description
         output_folder (type): description
         output_scores (bool): description
@@ -442,6 +472,9 @@ class NeuroNER(object):
         tagging_format (type): description
         token_embedding_dimension (type): description
         token_lstm_hidden_state_dimension (type): description
+        recall_inference_bias (type): description
+        enable_leading_spaces_feature (type): description
+        enable_capitalization_feature (type): description
         token_pretrained_embedding_filepath (type): description
         tokenizer (type): description
         train_model (type): description
@@ -470,7 +503,19 @@ class NeuroNER(object):
         session_conf = tf.ConfigProto(
             intra_op_parallelism_threads=self.parameters['number_of_cpu_threads'],
             inter_op_parallelism_threads=self.parameters['number_of_cpu_threads'],
-            device_count={'CPU': 1, 'GPU': self.parameters['number_of_gpus']},
+            device_count={
+                'CPU': self.parameters['number_of_cpus'],
+                'GPU': self.parameters['number_of_gpus'],
+                },
+            graph_options=tf.GraphOptions(
+                optimizer_options=tf.OptimizerOptions(
+                    do_common_subexpression_elimination=True,
+                    do_constant_folding=True,
+                    do_function_inlining=True,
+                    opt_level=tf.OptimizerOptions.L1,
+                    global_jit_level=tf.OptimizerOptions.ON_2),
+                infer_shapes=True,
+                place_pruned_graph=True),
             allow_soft_placement=True,
             log_device_placement=False)
 
@@ -696,47 +741,47 @@ class NeuroNER(object):
                 print('Training completed in {0:.2f} seconds'.format(epoch_elapsed_training_time),
                     flush=True)
 
-                y_pred, y_true, output_filepaths = train.predict_labels(sess, model,
-                    transition_params_trained, parameters, modeldata, epoch_number,
-                    stats_graph_folder, dataset_filepaths)
+                if (parameters['train_model'] and epoch_number % 5 == 0) or not parameters['train_model']:
+                    y_pred, y_true, output_filepaths = train.predict_labels(sess, model,
+                        transition_params_trained, parameters, modeldata, epoch_number,
+                        stats_graph_folder, dataset_filepaths)
 
-                # Evaluate model: save and plot results
-                evaluate.evaluate_model(results, modeldata, y_pred, y_true, stats_graph_folder,
-                    epoch_number, epoch_start_time, output_filepaths, parameters)
+                    # Evaluate model: save and plot results
+                    evaluate.evaluate_model(results, modeldata, y_pred, y_true, stats_graph_folder,
+                            epoch_number, epoch_start_time, output_filepaths, parameters)
 
-                if parameters['use_pretrained_model'] and not parameters['train_model']:
-                    conll_to_brat.output_brat(output_filepaths, dataset_brat_folders, stats_graph_folder)
-                    break
+                    if parameters['use_pretrained_model'] and not parameters['train_model']:
+                        conll_to_brat.output_brat(output_filepaths, dataset_brat_folders, stats_graph_folder)
+                        break
 
-                # Save model
-                model.saver.save(sess, os.path.join(model_folder, 'model_{0:05d}.ckpt'.format(epoch_number)))
+                    # Save model
+                    model.saver.save(sess, os.path.join(model_folder, 'model_{0:05d}.ckpt'.format(epoch_number)))
 
-                # Save TensorBoard logs
-                summary = sess.run(model.summary_op, feed_dict=None)
-                writers['train'].add_summary(summary, epoch_number)
-                writers['train'].flush()
-                utils.copytree(writers['train'].get_logdir(), model_folder)
+                    # Save TensorBoard logs
+                    # summary = sess.run(model.summary_op, feed_dict=None)
+                    # writers['train'].add_summary(summary, epoch_number)
+                    # writers['train'].flush()
+                    utils.copytree(writers['train'].get_logdir(), model_folder)
 
+                    # Early stop
+                    valid_f1_score = results['epoch'][epoch_number][0]['valid']['f1_score']['micro']
+                    if  valid_f1_score > previous_best_valid_f1_score:
+                        bad_counter = 0
+                        previous_best_valid_f1_score = valid_f1_score
+                        conll_to_brat.output_brat(output_filepaths, dataset_brat_folders,
+                            stats_graph_folder, overwrite=True)
+                        self.transition_params_trained = transition_params_trained
+                    else:
+                        bad_counter += 1
+                    print("The last {0} epochs have not shown improvements on the validation set.".format(bad_counter))
 
-                # Early stop
-                valid_f1_score = results['epoch'][epoch_number][0]['valid']['f1_score']['micro']
-                if  valid_f1_score > previous_best_valid_f1_score:
-                    bad_counter = 0
-                    previous_best_valid_f1_score = valid_f1_score
-                    conll_to_brat.output_brat(output_filepaths, dataset_brat_folders,
-                        stats_graph_folder, overwrite=True)
-                    self.transition_params_trained = transition_params_trained
-                else:
-                    bad_counter += 1
-                print("The last {0} epochs have not shown improvements on the validation set.".format(bad_counter))
+                    if bad_counter >= parameters['patience']:
+                        print('Early Stop!')
+                        results['execution_details']['early_stop'] = True
+                        break
 
-                if bad_counter >= parameters['patience']:
-                    print('Early Stop!')
-                    results['execution_details']['early_stop'] = True
-                    break
-
-                if epoch_number >= parameters['maximum_number_of_epochs']:
-                    break
+                    if epoch_number >= parameters['maximum_number_of_epochs']:
+                        break
 
         except KeyboardInterrupt:
             results['execution_details']['keyboard_interrupt'] = True

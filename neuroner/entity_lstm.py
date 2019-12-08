@@ -1,8 +1,33 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import os
 import pickle
 import re
+import string
 import time
 
+import numpy as np
 import tensorflow as tf
 
 from neuroner import utils
@@ -60,6 +85,29 @@ def bidirectional_LSTM(inputs, hidden_state_dimension, initializer,
     return output
 
 
+def _create_features(token):
+    results =  [
+            token.isupper(),
+            token.islower(),
+            token.istitle(),
+            token.isdigit(),
+            token.isalpha(),
+            all(e.isdigit() or e in string.punctuation for e in token),
+            all(e in string.punctuation for e in token),
+    ]
+    return list(map(float, results))
+
+
+class InputCapitalizationMeta(type):
+    @property
+    def depth(self):
+        return len(tuple(_create_features('')))
+
+    def create_columns(self, tokens):
+        return np.array(list(map(_create_features, tokens)))
+
+
+
 class EntityLSTM(object):
     """
     An LSTM architecture for named entity recognition.
@@ -68,6 +116,9 @@ class EntityLSTM(object):
     Then the character vector is concatenated with token embedding vector, 
     which is input to another LSTM  followed by a CRF layer.
     """
+    class InputCapitalization(object, metaclass=InputCapitalizationMeta): pass
+
+
     def __init__(self, dataset, parameters):
 
         self.verbose = False
@@ -75,6 +126,8 @@ class EntityLSTM(object):
         # Placeholders for input, output and dropout
         self.input_token_indices = tf.placeholder(tf.int32, [None], 
             name="input_token_indices")
+        self.input_capitalization = tf.placeholder(tf.float32, [None, EntityLSTM.InputCapitalization.depth], name="input_capitalization")
+        self.input_leading_spaces = tf.placeholder(tf.float32, [None], name="input_leading_spaces")
         self.input_label_indices_vector = tf.placeholder(tf.float32, [None, 
             dataset.number_of_classes], name="input_label_indices_vector")
         self.input_label_indices_flat = tf.placeholder(tf.int32, [None], 
@@ -85,6 +138,10 @@ class EntityLSTM(object):
             name="input_token_lengths")
         self.dropout_keep_prob = tf.placeholder(tf.float32, 
             name="dropout_keep_prob")
+        self.recall_inference_bias = tf.placeholder_with_default(
+            tf.constant(0.0, dtype=tf.float32),
+            shape=[],
+            name="recall_inference_bias")
 
         # Internal parameters
         initializer = tf.contrib.layers.xavier_initializer()
@@ -139,6 +196,18 @@ class EntityLSTM(object):
                     print("token_lstm_input: {0}".format(token_lstm_input))
         else:
             token_lstm_input = embedded_tokens
+
+        if parameters['enable_leading_spaces_feature']:
+            with tf.variable_scope('concat_leading_spaces_feature'):
+                expanded_input_leading_spaces = tf.expand_dims(self.input_leading_spaces,
+                        axis=-1, name='input_leading_spaces_expanded')
+                token_lstm_input = tf.concat(
+                        [token_lstm_input, expanded_input_leading_spaces], axis=1, name='token_lstm_input')
+
+        if parameters['enable_capitalization_feature']:
+            with tf.variable_scope('concat_capitalization_feature'):
+                token_lstm_input = tf.concat([token_lstm_input, self.input_capitalization],
+                    axis=1, name='token_lstm_input')
 
         # Add dropout
         with tf.variable_scope("dropout"):
@@ -195,6 +264,12 @@ class EntityLSTM(object):
             
             b = tf.Variable(tf.constant(0.0, shape=[dataset.number_of_classes]), 
                 name="bias")
+            b = tf.add(
+                    b,
+                    tf.concat([
+                            tf.expand_dims(self.recall_inference_bias, axis=0),
+                            tf.constant([0.0] * (dataset.number_of_classes - 1),dtype=tf.float32),
+                    ], axis=0))
             
             scores = tf.nn.xw_plus_b(outputs, W, b, name="scores")
             self.unary_scores = scores
@@ -358,7 +433,10 @@ class EntityLSTM(object):
         print("number_of_token_lowercase_and_digits_replaced_with_zeros_found: {0}".format(number_of_token_lowercase_and_digits_replaced_with_zeros_found))
         print('number_of_loaded_word_vectors: {0}'.format(number_of_loaded_word_vectors))
         print("dataset.vocabulary_size: {0}".format(dataset.vocabulary_size))
-        sess.run(self.token_embedding_weights.assign(initial_weights))
+        token_embedding_weights_placeholder = tf.placeholder(
+                dtype=self.token_embedding_weights.dtype, shape=self.token_embedding_weights.shape)
+        sess.run(self.token_embedding_weights.assign(token_embedding_weights_placeholder),
+                feed_dict={token_embedding_weights_placeholder: initial_weights})
 
     def load_embeddings_from_pretrained_model(self, sess, dataset, pretraining_dataset, 
         pretrained_embedding_weights, embedding_type='token'):
@@ -400,7 +478,10 @@ class EntityLSTM(object):
         elif embedding_type == 'character':
             print("dataset.alphabet_size: {0}".format(dataset.alphabet_size))
         
-        sess.run(embedding_weights.assign(initial_weights))
+        embedding_weights_placeholder = tf.placeholder(
+                dtype=embedding_weights.dtype, shape=embedding_weights.shape)
+        sess.run(embedding_weights.assign(embedding_weights_placeholder),
+                feed_dict={embedding_weights_placeholder: initial_weights})
 
     def restore_from_pretrained_model(self, parameters, dataset, sess, 
         token_to_vector=None):
@@ -418,7 +499,8 @@ class EntityLSTM(object):
         
         # Assert that the label sets are the same
         # Test set should have the same label set as the pretrained dataset
-        assert pretraining_dataset.index_to_label == dataset.index_to_label
+        if not parameters['allow_labels_not_in_pretrained_model']:
+            assert pretraining_dataset.index_to_label == dataset.index_to_label
     
         # If the token and character mappings are exactly the same
         if pretraining_dataset.index_to_token == dataset.index_to_token and \

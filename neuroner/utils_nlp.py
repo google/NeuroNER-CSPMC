@@ -1,3 +1,26 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 '''
 Miscellaneous utility functions for natural language processing
 '''
@@ -15,8 +38,9 @@ def load_tokens_from_pretrained_token_embeddings(parameters):
     tokens = set()
     number_of_loaded_word_vectors = 0
     for cur_line in file_input:
+        if cur_line.endswith('\n'): cur_line = cur_line[:-1]
         count += 1
-        cur_line = cur_line.strip()
+        # cur_line = cur_line.strip() # Removed for non-space-alas-whitespace support.
         cur_line = cur_line.split(' ')
         if len(cur_line)==0:continue
         token=cur_line[0]
@@ -31,13 +55,15 @@ def load_pretrained_token_embeddings(parameters):
     count = -1
     token_to_vector = {}
     for cur_line in file_input:
+        if cur_line.endswith('\n'): cur_line = cur_line[:-1]
         count += 1
         #if count > 1000:break
-        cur_line = cur_line.strip()
+        # cur_line = cur_line.strip() # Removed for non-space-alas-whitespace support.
         cur_line = cur_line.split(' ')
         if len(cur_line)==0:continue
         token = cur_line[0]
         vector = np.array([float(x) for x in cur_line[1:]])
+        if len(vector) == 0:continue # The token '\x85' in glove840B results in a zero-sized vector.
         token_to_vector[token] = vector
     file_input.close()
     return token_to_vector

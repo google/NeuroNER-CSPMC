@@ -1,3 +1,26 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import sklearn.preprocessing
 
 import collections
@@ -29,10 +52,14 @@ class Dataset(object):
         line_count = -1
         tokens = []
         labels = []
+        leading_spaces = []
         new_token_sequence = []
         new_label_sequence = []
+        new_leading_space_sequence = []
         if dataset_filepath:
             f = codecs.open(dataset_filepath, 'r', 'UTF-8')
+            prev_note = None
+            prev_end = None
             for line in f:
                 line_count += 1
                 line = line.strip().split(' ')
@@ -40,16 +67,25 @@ class Dataset(object):
                     if len(new_token_sequence) > 0:
                         labels.append(new_label_sequence)
                         tokens.append(new_token_sequence)
+                        leading_spaces.append(new_leading_space_sequence)
                         new_token_sequence = []
                         new_label_sequence = []
+                        new_leading_space_sequence = []
                     continue
-                token = str(line[0])
-                label = str(line[-1])
+                (token, note, start, end), label = line[0:4], line[-1]
+                start, end = int(start), int(end)
                 token_count[token] += 1
                 label_count[label] += 1
 
                 new_token_sequence.append(token)
                 new_label_sequence.append(label)
+
+                if prev_note == note:
+                  new_leading_space_sequence.append(start - prev_end)
+                else:
+                  new_leading_space_sequence.append(start)
+                prev_note = note
+                prev_end = end
 
                 for character in token:
                     character_count[character] += 1
@@ -59,8 +95,9 @@ class Dataset(object):
             if len(new_token_sequence) > 0:
                 labels.append(new_label_sequence)
                 tokens.append(new_token_sequence)
+                leading_spaces.append(new_leading_space_sequence)
             f.close()
-        return labels, tokens, token_count, label_count, character_count
+        return labels, tokens, token_count, label_count, character_count, leading_spaces
 
 
     def _convert_to_indices(self, dataset_types):
@@ -97,7 +134,10 @@ class Dataset(object):
             
             label_indices[dataset_type] = []
             for label_sequence in labels[dataset_type]:
-                label_indices[dataset_type].append([label_to_index[label] for label in label_sequence])
+                label_indices[dataset_type].append([
+                    # `label` not in `label_to_index` may only happen if parameter allow_labels_not_in_pretrained_model is true.
+                    label_to_index[label] if label in label_to_index else label_to_index['O'] for label in label_sequence
+                ])
         
         if self.verbose:
             print('token_lengths[\'train\'][0][0:10]: {0}'.format(token_lengths['train'][0][0:10]))
@@ -134,7 +174,7 @@ class Dataset(object):
         Overwrites the data of type specified in dataset_types using the existing token_to_index, character_to_index, and label_to_index mappings. 
         '''
         for dataset_type in dataset_types:
-            self.labels[dataset_type], self.tokens[dataset_type], _, _, _ = self._parse_dataset(dataset_filepaths.get(dataset_type, None))
+            self.labels[dataset_type], self.tokens[dataset_type], _, _, _, self.leading_spaces[dataset_type] = self._parse_dataset(dataset_filepaths.get(dataset_type, None))
         
         token_indices, label_indices, character_indices_padded, character_indices, token_lengths, characters, label_vector_indices = self._convert_to_indices(dataset_types)
         
@@ -185,8 +225,9 @@ class Dataset(object):
         label_count = {}
         token_count = {}
         character_count = {}
+        leading_spaces = {}
         for dataset_type in ['train', 'valid', 'test', 'deploy']:
-            labels[dataset_type], tokens[dataset_type], token_count[dataset_type], label_count[dataset_type], character_count[dataset_type] \
+            labels[dataset_type], tokens[dataset_type], token_count[dataset_type], label_count[dataset_type], character_count[dataset_type], leading_spaces[dataset_type] \
                 = self._parse_dataset(dataset_filepaths.get(dataset_type, None))
 
             if self.verbose: 
@@ -290,21 +331,25 @@ class Dataset(object):
 
         if parameters['use_pretrained_model']:
             self.unique_labels = sorted(list(pretraining_dataset.label_to_index.keys()))
-            # Make sure labels are compatible with the pretraining dataset.
-            for label in label_count['all']:
-                if label not in pretraining_dataset.label_to_index:
-                    raise AssertionError("The label {0} does not exist in the pretraining dataset. ".format(label) +
-                                         "Please ensure that only the following labels exist in the dataset: {0}".format(', '.join(self.unique_labels)))
+            # Add labels missing in the pretraining dataset.
             label_to_index = pretraining_dataset.label_to_index.copy()
+            new_labels = set(label_count['all']).difference(label_to_index)
+            if new_labels:
+                msg = ("The labels {0} do not exist in the pretraining dataset. "
+                       "Please ensure that only the following labels exist in the dataset: {1}").format(
+                           ', '.join(new_labels), ', '.join(self.unique_labels))
+                if parameters['allow_labels_not_in_pretrained_model']:
+                    print("Warning: ",msg)
+                else:
+                    raise AssertionError(msg)
         else:
-            label_to_index = {}
-            iteration_number = 0
-            for label, count in label_count['all'].items():
-                label_to_index[label] = iteration_number
-                iteration_number += 1
-                self.unique_labels.append(label)
+            # Enforce zero index for 'O' as required by the recall bias feature.
+            label_to_index = {k: i + 1 for i, k in enumerate(set(label_count['all']).difference('O'))}
+            label_to_index['O'] = 0
+            self.unique_labels.extend(label_to_index)
 
         if self.verbose: 
+            print('label_to_index = ', label_to_index)
             print('self.unique_labels: {0}'.format(self.unique_labels))
 
         character_to_index = {}
@@ -365,6 +410,7 @@ class Dataset(object):
             print("len(self.index_to_token): {0}".format(len(self.index_to_token)))
         self.tokens = tokens
         self.labels = labels
+        self.leading_spaces = leading_spaces
 
         token_indices, label_indices, character_indices_padded, character_indices, token_lengths, characters, label_vector_indices = self._convert_to_indices(dataset_filepaths.keys())
         

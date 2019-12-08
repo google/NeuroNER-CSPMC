@@ -1,9 +1,35 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import codecs
 import os
 import pkg_resources
 import pickle
 import warnings
+import threading
+import time
 
+from absl import logging
 import numpy as np
 import sklearn.metrics
 import tensorflow as tf
@@ -26,11 +52,14 @@ def train_step(sess, dataset, sequence_number, model, parameters):
 
     feed_dict = {
       model.input_token_indices: token_indices_sequence,
+      model.input_capitalization: model.InputCapitalization.create_columns(map(dataset.index_to_token.get, token_indices_sequence)),
+      model.input_leading_spaces: dataset.leading_spaces['train'][sequence_number],
       model.input_label_indices_vector: dataset.label_vector_indices['train'][sequence_number],
       model.input_token_character_indices: dataset.character_indices_padded['train'][sequence_number],
       model.input_token_lengths: dataset.token_lengths['train'][sequence_number],
       model.input_label_indices_flat: dataset.label_indices['train'][sequence_number],
-      model.dropout_keep_prob: 1-parameters['dropout_rate']}
+      model.dropout_keep_prob: 1-parameters['dropout_rate'],
+      }
 
     _, _, loss, accuracy, transition_params_trained = sess.run(
                     [model.train_op, model.global_step, model.loss, model.accuracy,
@@ -55,17 +84,44 @@ def prediction_step(sess, dataset, dataset_type, model, transition_params_traine
     output_file = codecs.open(output_filepath, 'w', 'UTF-8')
     original_conll_file = codecs.open(dataset_filepaths[dataset_type], 'r', 'UTF-8')
 
-    for i in range(len(dataset.token_indices[dataset_type])):
-        feed_dict = {
-          model.input_token_indices: dataset.token_indices[dataset_type][i],
-          model.input_token_character_indices: dataset.character_indices_padded[dataset_type][i],
-          model.input_token_lengths: dataset.token_lengths[dataset_type][i],
-          model.input_label_indices_vector: dataset.label_vector_indices[dataset_type][i],
-          model.dropout_keep_prob: 1.
-        }
+    res = [None] * len(dataset.token_indices[dataset_type])
 
-        unary_scores, predictions = sess.run([model.unary_scores,
-            model.predictions], feed_dict)
+    def step(start, end):
+        for i in range(start, end):
+            token_indices_sequence = dataset.token_indices[dataset_type][i]
+            feed_dict = {
+              model.input_token_indices: token_indices_sequence,
+              model.input_leading_spaces: dataset.leading_spaces[dataset_type][i],
+              model.input_capitalization: model.InputCapitalization.create_columns(map(dataset.index_to_token.get, token_indices_sequence)),
+              model.input_token_character_indices: dataset.character_indices_padded[dataset_type][i],
+              model.input_token_lengths: dataset.token_lengths[dataset_type][i],
+              model.input_label_indices_vector: dataset.label_vector_indices[dataset_type][i],
+              model.dropout_keep_prob: 1.,
+              model.recall_inference_bias: parameters['recall_inference_bias'] if not parameters['train_model'] else 0.0,
+            }
+            res[i] = unary_scores, predictions = sess.run([model.unary_scores,
+                model.predictions], feed_dict)
+            logging.log_every_n_seconds(logging.INFO, 'Predict... run model [{dataset}] {percent}%'.format(dataset=dataset_type ,percent=round(100*i/len(dataset.token_indices[dataset_type]), ndigits=1)), n_seconds=10)
+
+    chunk_size = min(1, int(len(res) / parameters['number_of_cpu_threads_prediction']))
+    threads = [threading.Thread(target=step, args=(i, min(len(res), i+chunk_size))) for i in range(0, len(res), chunk_size)]
+    for t in threads:
+        while True:
+            try:
+                t.start()
+            except RuntimeError as e:
+                logging.warning('RuntimeError: can\'t start new thread ######## threading.active_count=%d'% (threading.active_count(),) )
+                time.sleep(3)
+                continue
+            else:
+                break
+    for t in threads:
+        t.join()
+        del t
+    del threads
+
+    for i in range(len(dataset.token_indices[dataset_type])):
+        unary_scores, predictions = res[i]
 
         if parameters['use_crf']:
             predictions, _ = tf.contrib.crf.viterbi_decode(unary_scores,
@@ -122,6 +178,7 @@ def prediction_step(sess, dataset, dataset_type, model, transition_params_traine
 
         all_predictions.extend(predictions)
         all_y_true.extend(dataset.label_indices[dataset_type][i])
+        logging.log_every_n_seconds(logging.INFO, 'Predict... eval [{dataset}] {percent}%'.format(dataset=dataset_type ,percent=round(100*i/len(dataset.token_indices[dataset_type]), ndigits=1)), n_seconds=10)
 
     output_file.close()
     original_conll_file.close()
@@ -161,6 +218,7 @@ def predict_labels(sess, model, transition_params_trained, parameters, dataset,
     """
     Predict labels using trained model
     """
+    seconds = int(time.time())
     y_pred = {}
     y_true = {}
     output_filepaths = {}
@@ -173,5 +231,8 @@ def predict_labels(sess, model, transition_params_trained, parameters, dataset,
             transition_params_trained, stats_graph_folder, epoch_number,
             parameters, dataset_filepaths)
         y_pred[dataset_type], y_true[dataset_type], output_filepaths[dataset_type] = prediction_output
+
+    seconds = int(time.time()) - seconds
+    logging.info('Eval took %d seconds', seconds)
 
     return y_pred, y_true, output_filepaths

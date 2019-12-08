@@ -1,3 +1,26 @@
+# MIT License
+#
+# Copyright 2019 Google LLC
+# Copyright (c) 2019 Franck Dernoncourt, Jenny Lee, Tom Pollard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 '''
 This script prepares a pretrained model to be shared without exposing the data used for training.
 '''
@@ -6,16 +29,16 @@ import os
 import pickle
 from pprint import pprint
 import shutil
-import utils
 
-from entity_lstm import EntityLSTM
+from neuroner import utils
+from neuroner.entity_lstm import EntityLSTM
 import tensorflow as tf
 from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
 
 from neuroner import utils_tf
 from neuroner import neuromodel
 
-def trim_dataset_pickle(input_dataset_filepath, output_dataset_filepath=None, delete_token_mappings=False):
+def trim_dataset_pickle(input_dataset_filepath, output_dataset_filepath=None, delete_token_mappings=False, verbose=False):
     '''
     Remove the dataset and labels from dataset.pickle. 
     If delete_token_mappings = True, then also remove token_to_index and index_to_token except for UNK.
@@ -39,13 +62,14 @@ def trim_dataset_pickle(input_dataset_filepath, output_dataset_filepath=None, de
         dataset.__dict__['token_to_index'] = {dataset.__dict__['UNK']:dataset.__dict__['UNK_TOKEN_INDEX']}
         dataset.__dict__['index_to_token'] = {dataset.__dict__['UNK_TOKEN_INDEX']:dataset.__dict__['UNK']}
     print("Number of keys removed: {0}".format(count))
-    pprint(dataset.__dict__)
+    if verbose:
+        pprint(dataset.__dict__)
     pickle.dump(dataset, open(output_dataset_filepath, 'wb'))
     print("Done!")
 
 
 def trim_model_checkpoint(parameters_filepath, dataset_filepath, input_checkpoint_filepath, 
-    output_checkpoint_filepath):
+                          output_checkpoint_filepath, verbose=False):
     '''
     Remove all token embeddings except UNK.
     '''
@@ -70,17 +94,19 @@ def trim_model_checkpoint(parameters_filepath, dataset_filepath, input_checkpoin
         sess.run(tf.assign(model.token_embedding_weights, initial_weights, validate_shape=False))
     
         token_embedding_weights = sess.run(model.token_embedding_weights) 
-        print("token_embedding_weights: {0}".format(token_embedding_weights))
+        if verbose:
+            print("token_embedding_weights: {0}".format(token_embedding_weights))
         
         model_saver.save(sess, output_checkpoint_filepath)
             
     dataset.__dict__['vocabulary_size'] = 1
     pickle.dump(dataset, open(dataset_filepath, 'wb'))
-    pprint(dataset.__dict__)
+    if verbose:
+        pprint(dataset.__dict__)
 
 
 def prepare_pretrained_model_for_restoring(output_folder_name, epoch_number, 
-    model_name, delete_token_mappings=False):
+                                           model_name, delete_token_mappings=False, verbose=False):
     '''
     Copy the dataset.pickle, parameters.ini, and model checkpoint files after 
     removing the data used for training.
@@ -110,7 +136,7 @@ def prepare_pretrained_model_for_restoring(output_folder_name, epoch_number,
     input_dataset_filepath = os.path.join(input_model_folder, 'dataset.pickle')
     output_dataset_filepath = os.path.join(output_model_folder, 'dataset.pickle')
     trim_dataset_pickle(input_dataset_filepath, output_dataset_filepath, 
-        delete_token_mappings=delete_token_mappings)
+                        delete_token_mappings=delete_token_mappings,verbose=verbose)
     
     # copy parameters.ini
     parameters_filepath = os.path.join(input_model_folder, 'parameters.ini')
@@ -123,7 +149,7 @@ def prepare_pretrained_model_for_restoring(output_folder_name, epoch_number,
             'model_{0}.ckpt'.format(epoch_number_string))
         output_checkpoint_filepath = os.path.join(output_model_folder, 'model.ckpt')
         trim_model_checkpoint(parameters_filepath, output_dataset_filepath, 
-            input_checkpoint_filepath, output_checkpoint_filepath)
+                              input_checkpoint_filepath, output_checkpoint_filepath, verbose)
     else:
         for filepath in glob.glob(os.path.join(input_model_folder, 
             'model_{0}.ckpt*'.format(epoch_number_string))):

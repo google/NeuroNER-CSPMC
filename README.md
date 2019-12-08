@@ -1,4 +1,49 @@
-# NeuroNER
+# NeuroNER based system for reproducing paper results
+
+In the paper *Customization Scenarios for De-identification of Clinical Notes*
+by Hartman et al. from Google LLC, we used a text de-identification system
+that's very similar to this code. This code is based on NeuroNER, an open source
+program that performs named-entity recognition (NER). Website:
+[neuroner.com](http://neuroner.com).
+
+NOTICE: This is not an officially supported Google product.
+
+## Notes
+
+-   Embedding:
+    [glove.840B.300d.zip](http://nlp.stanford.edu/data/glove.840B.300d.zip)
+-   Types: `AGE`, `CITY`, `DATE`, `EMAIL`, `ID`, `MEDICALRECORD`, `NAME`,
+    `PHONE`, `STREET`, `ZIPCODE`
+-   We have released a labeling of Physionet Gold Corpus following the I2B2-2014
+    guidelines in order to facilitate fair comparison
+    [deid-annotations](https://g.co/kaggle/deid-annotations).
+-   We comprised three versions for each note in our train set to robustify our
+    model to case changes: lower, upper and original.
+
+## Utility scripts
+
+-   **Model Training:**
+
+    `run.py --train --dataset_text_folder=<dataset>
+    --token_embedding_dimension=300 --output_folder=<something> --threads_tf=128
+    --threads_prediction=10`
+
+-   **Evaluate saved training models @epoch:**
+
+    -   **Save model @epoch to `trained_model` directory:**
+
+        `share_model.py`
+
+    -   **Run evaluation of a model on a dataset:**
+
+        `util.py --eval --pretrained_model_folder=<trained_model>
+        --dataset_text_folder=<dataset> --rbias=0 --edim=300`
+
+    -   **Evaluate binary/typed results in `results.json`:**
+
+        `eval.py --metrics=<binary|token> --datasets=<eval-on-dataset-folder>`
+
+## NeuroNER
 
 [![Build Status](https://travis-ci.org/Franck-Dernoncourt/NeuroNER.svg?branch=master)](https://travis-ci.org/Franck-Dernoncourt/NeuroNER)
 
