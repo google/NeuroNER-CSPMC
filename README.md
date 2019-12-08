@@ -43,6 +43,10 @@ NOTICE: This is not an officially supported Google product.
 
         `eval.py --metrics=<binary|token> --datasets=<eval-on-dataset-folder>`
 
+
+Next is the rest of the original NeuroNER `README.md`.
+
+
 ## NeuroNER
 
 [![Build Status](https://travis-ci.org/Franck-Dernoncourt/NeuroNER.svg?branch=master)](https://travis-ci.org/Franck-Dernoncourt/NeuroNER)
